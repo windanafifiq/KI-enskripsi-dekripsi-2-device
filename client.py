@@ -2,22 +2,32 @@ import socket
 from Crypto.Cipher import DES
 from Crypto.Util.Padding import pad, unpad
 import threading
+import hmac, hashlib
 
 # Key yang sama untuk server dan client (8 byte untuk DES)
 SHARED_KEY = b'12345678'
+HMAC_KEY = b'secret_hmac_key'
 
 def encrypt(message):
     """Enkripsi pesan menggunakan DES-CBC"""
     cipher = DES.new(SHARED_KEY, DES.MODE_CBC)
     padded_message = pad(message.encode('utf-8'), DES.block_size)
     encrypted_data = cipher.encrypt(padded_message)
-    return cipher.iv + encrypted_data  # IV + ciphertext
+
+    tag = hmac.new(HMAC_KEY, cipher.iv + encrypted_data, hashlib.sha256).digest()
+    return cipher.iv + encrypted_data + tag # IV + ciphertext
 
 def decrypt(data):
     """Dekripsi pesan menggunakan DES-CBC"""
     try:
         iv = data[:8]  # 8 byte pertama adalah IV
-        ciphertext = data[8:]  # Sisanya adalah ciphertext
+        tag = data[-32:]
+        ciphertext = data[8:-32]  
+
+        calc_tag = hmac.new(HMAC_KEY, iv + ciphertext, hashlib.sha256).digest()
+        if not hmac.compare_digest(tag, calc_tag):
+            return "[ERROR] HMAC verification failed!"
+
         cipher = DES.new(SHARED_KEY, DES.MODE_CBC, iv)
         decrypted_data = cipher.decrypt(ciphertext)
         return unpad(decrypted_data, DES.block_size).decode('utf-8')
