@@ -1,18 +1,28 @@
 import socket
-from Crypto.Cipher import DES, PKCS1_OAEP
-from Crypto.PublicKey import RSA
+from Crypto.Cipher import DES
 from Crypto.Util.Padding import pad, unpad
 import threading
 import hmac, hashlib
 import os
 
-# Kunci sesi global untuk client ini, akan diisi setelah key exchange
+# Kunci sesi global
 SESSION_DES_KEY = None
 SESSION_HMAC_KEY = None
 
+# ==========================================
+# 🧠 IMPLEMENTASI RSA MANUAL (ENKRIPSI)
+# ==========================================
 
-def encrypt(message, des_key, hmac_key):
-    """Enkripsi pesan menggunakan DES-CBC (using session keys)"""
+def encrypt_rsa_manual(message_int, public_key):
+    e, n = public_key
+    # Encryption: C = M^e mod n
+    return pow(message_int, e, n)
+
+# ==========================================
+# 🌐 LOGIKA CLIENT
+# ==========================================
+
+def encrypt_des(message, des_key, hmac_key):
     try:
         cipher = DES.new(des_key, DES.MODE_CBC)
         padded_message = pad(message.encode('utf-8'), DES.block_size)
@@ -23,17 +33,14 @@ def encrypt(message, des_key, hmac_key):
         print(f"[ERROR] Encryption failed: {e}")
         return None
 
-def decrypt(data, des_key, hmac_key):
-    """Dekripsi pesan menggunakan DES-CBC (using session keys)"""
+def decrypt_des(data, des_key, hmac_key):
     try:
         iv = data[:8]
         tag = data[-32:]
         ciphertext = data[8:-32]
-
         calc_tag = hmac.new(hmac_key, iv + ciphertext, hashlib.sha256).digest()
         if not hmac.compare_digest(tag, calc_tag):
             return "[ERROR] HMAC verification failed!"
-
         cipher = DES.new(des_key, DES.MODE_CBC, iv)
         decrypted_data = cipher.decrypt(ciphertext)
         return unpad(decrypted_data, DES.block_size).decode('utf-8')
@@ -41,117 +48,91 @@ def decrypt(data, des_key, hmac_key):
         return f"[ERROR] Decryption failed: {e}"
 
 def receive_messages(client_socket):
-    """Thread untuk menerima pesan dari server"""
     print("\n[THREAD] Started receiving from server")
     while True:
         try:
             encrypted_data = client_socket.recv(1024)
             if not encrypted_data:
                 print("\n[INFO] Connection closed by server")
-                break
+                os._exit(0) # Force exit agar prompt tidak nyangkut
             
-            # Gunakan session keys untuk dekripsi
-            decrypted_message = decrypt(encrypted_data, SESSION_DES_KEY, SESSION_HMAC_KEY)
-            
-            # Tampilkan pesan dari server/klien lain
+            decrypted_message = decrypt_des(encrypted_data, SESSION_DES_KEY, SESSION_HMAC_KEY)
             print(f"\n{decrypted_message}")
-            # Tampilkan ulang prompt input
             print(f"[CLIENT] Enter 'list' or '[ID]:[message]' ('quit'): ", end="")
             
         except Exception as e:
             print(f"\n[ERROR] Connection lost: {e}")
-            print("Please type 'quit' to exit.")
             break
-            
-    print("[THREAD] Receive thread stopped.")
-
 
 def send_messages(client_socket):
-    """Thread untuk mengirim pesan ke server"""
-    print("\n[THREAD] Started sending thread")
     while True:
         try:
-            # Ubah prompt input
             message = input("\n[CLIENT] Enter 'list' or '[ID]:[message]' ('quit'): ")
-            
             if message.lower() == 'quit':
-                print("[INFO] Closing connection...")
                 break
-            
-            if not message:
-                continue
+            if not message: continue
 
-            # Gunakan session keys untuk enkripsi
-            encrypted_message = encrypt(message, SESSION_DES_KEY, SESSION_HMAC_KEY)
+            encrypted_message = encrypt_des(message, SESSION_DES_KEY, SESSION_HMAC_KEY)
             if encrypted_message:
                 client_socket.sendall(encrypted_message)
-
         except Exception as e:
             print(f"\n[ERROR] Sending failed: {e}")
-            print("Connection may be lost. Please type 'quit' to exit.")
             break
-            
-    print("[THREAD] Send thread stopped.")
     client_socket.close()
 
 def main():
     global SESSION_DES_KEY, SESSION_HMAC_KEY
     
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    print("="*60)
-    print("🔐 CLIENT - Client-to-Client Chat (via RSA Key Exchange)")
-    print("="*60)
-    print("Connecting to server at 127.0.0.1:12345...")
-    
+    print("Connecting to server...")
     try:
         client_socket.connect(('127.0.0.1', 12345))
-        print("✅ Connected to server!")
-        print("="*60)
+        print("✅ Connected!")
 
-        # --- RSA KEY EXCHANGE ---
-        print("[KEY-EX] Receiving server's public RSA key...")
-        server_public_key_data = client_socket.recv(1024)
-        server_public_key = RSA.import_key(server_public_key_data)
-        print("[KEY-EX] ✅ Server public key received.")
+        # --- RSA KEY EXCHANGE (MANUAL) ---
+        
+        # 1. Terima Public Key (e, n) string
+        server_pub_str = client_socket.recv(1024).decode('utf-8')
+        e_str, n_str = server_pub_str.split(',')
+        server_public_key = (int(e_str), int(n_str))
+        print(f"[KEY-EX] ✅ Server public key received: (e={e_str}, n=...truncated...)")
 
-        print("[KEY-EX] Generating session keys (DES+HMAC)...")
+        # 2. Generate Session Keys
         SESSION_DES_KEY = os.urandom(8)
         SESSION_HMAC_KEY = os.urandom(16)
-        print("[KEY-EX] ✅ Session keys generated.")
         
+        # Gabungkan key menjadi satu bundle bytes
         session_keys_bundle = SESSION_DES_KEY + SESSION_HMAC_KEY
+        
+        # 3. Ubah Bytes ke Integer agar bisa dihitung RSA
+        message_int = int.from_bytes(session_keys_bundle, 'big')
+        
+        # Pastikan message_int < n (Syarat RSA)
+        if message_int >= server_public_key[1]:
+            raise ValueError("Key bundle too large for RSA modulus size!")
 
-        cipher_rsa = PKCS1_OAEP.new(server_public_key)
-        encrypted_session_keys = cipher_rsa.encrypt(session_keys_bundle)
-
-        print("[KEY-EX] Sending encrypted session keys...")
-        client_socket.sendall(encrypted_session_keys)
-        print("[KEY-EX] ✅ Key exchange complete. Secure channel established.")
-        print("="*60)
-        print("Ketik 'list' untuk melihat klien lain.")
-        print("Ketik '[ID]:[PESAN]' untuk mengirim pesan.")
+        # 4. Enkripsi RSA Manual: C = M^e mod n
+        encrypted_int = encrypt_rsa_manual(message_int, server_public_key)
+        
+        # Kirim sebagai string angka (sederhana)
+        client_socket.sendall(str(encrypted_int).encode('utf-8'))
+        
+        print("[KEY-EX] ✅ Encrypted session keys sent.")
         print("="*60)
         
-        # --- END OF KEY EXCHANGE ---
+        # --- END EXCHANGE ---
 
-        receive_thread = threading.Thread(target=receive_messages, 
-                                          args=(client_socket,), 
-                                          daemon=True)
-        send_thread = threading.Thread(target=send_messages, 
-                                       args=(client_socket,),
-                                       daemon=False)
+        receive_thread = threading.Thread(target=receive_messages, args=(client_socket,), daemon=True)
+        send_thread = threading.Thread(target=send_messages, args=(client_socket,), daemon=False)
         
         receive_thread.start()
         send_thread.start()
-        
         send_thread.join()
         
     except Exception as e:
         print(f"\n[ERROR] Connection failed: {e}")
     finally:
         client_socket.close()
-        print("\n[INFO] Client stopped.")
 
 if __name__ == "__main__":
     main()
